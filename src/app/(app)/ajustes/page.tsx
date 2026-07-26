@@ -4,14 +4,12 @@ import { useEffect, useState } from "react";
 
 type Settings = {
   searchAreas: string[];
-  categories: string[];
   targetLeadCount: number;
 };
 
 export default function AjustesPage() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [areasText, setAreasText] = useState("");
-  const [categoriesText, setCategoriesText] = useState("");
   const [targetLeadCount, setTargetLeadCount] = useState(30);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -22,7 +20,6 @@ export default function AjustesPage() {
       .then((data: Settings) => {
         setSettings(data);
         setAreasText(data.searchAreas.join("\n"));
-        setCategoriesText(data.categories.join("\n"));
         setTargetLeadCount(data.targetLeadCount);
       });
   }, []);
@@ -32,7 +29,6 @@ export default function AjustesPage() {
     setSaved(false);
     const body = {
       searchAreas: areasText.split("\n").map((s) => s.trim()).filter(Boolean),
-      categories: categoriesText.split("\n").map((s) => s.trim()).filter(Boolean),
       targetLeadCount,
     };
     const res = await fetch("/api/settings", {
@@ -55,7 +51,9 @@ export default function AjustesPage() {
       <div>
         <h1 className="text-lg font-semibold text-slate-900">Ajustes de búsqueda</h1>
         <p className="mt-1 text-sm text-slate-500">
-          Define dónde y qué tipo de negocios buscar cada semana. Estos cambios aplican al
+          Define dónde buscar cada semana. La búsqueda usa OpenStreetMap (gratis, sin API
+          key) e incluye inmobiliarias, corredoras de propiedades, coworkings y
+          administradoras de edificios registradas en cada zona. Estos cambios aplican al
           próximo lote generado (manual o por cron).
         </p>
       </div>
@@ -67,18 +65,6 @@ export default function AjustesPage() {
         <textarea
           value={areasText}
           onChange={(e) => setAreasText(e.target.value)}
-          rows={8}
-          className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
-        />
-      </div>
-
-      <div>
-        <label className="block text-sm font-medium text-slate-700">
-          Rubros / tipo de negocio a buscar (uno por línea)
-        </label>
-        <textarea
-          value={categoriesText}
-          onChange={(e) => setCategoriesText(e.target.value)}
           rows={8}
           className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-500 focus:outline-none"
         />

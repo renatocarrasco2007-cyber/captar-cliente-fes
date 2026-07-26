@@ -1,7 +1,7 @@
 import { getDb } from "@/db";
 import { batches, leads } from "@/db/schema";
 import { getSearchSettings } from "@/lib/config";
-import { searchPlaces, type PlaceResult } from "@/lib/places";
+import { searchPlacesInArea, type PlaceResult } from "@/lib/places";
 import { inArray } from "drizzle-orm";
 
 function shuffle<T>(arr: T[]): T[] {
@@ -18,54 +18,54 @@ export type GenerateResult = {
   weekStart: string;
   weekEnd: string;
   leadCount: number;
-  combosTried: number;
+  areasTried: number;
 };
 
 export async function generateWeeklyBatch(): Promise<GenerateResult> {
   const db = getDb();
-  const { searchAreas, categories, targetLeadCount } = await getSearchSettings();
+  const { searchAreas, targetLeadCount } = await getSearchSettings();
 
-  const combos = shuffle(
-    categories.flatMap((category) => searchAreas.map((area) => ({ category, area })))
-  );
+  const areas = shuffle(searchAreas);
 
   const existingPlaceIds = new Set(
     (await db.select({ placeId: leads.placeId }).from(leads)).map((r) => r.placeId)
   );
 
-  const collected: (PlaceResult & { category: string; area: string })[] = [];
+  const collected: (PlaceResult & { area: string })[] = [];
   const seenThisRun = new Set<string>();
-  let combosTried = 0;
+  let areasTried = 0;
   let errors = 0;
   let lastError: unknown = null;
 
-  for (const combo of combos) {
+  for (const area of areas) {
     if (collected.length >= targetLeadCount) break;
-    combosTried++;
+    areasTried++;
 
     let results: PlaceResult[];
     try {
-      results = await searchPlaces(combo.category, combo.area);
+      results = await searchPlacesInArea(area);
     } catch (err) {
-      console.error(`Error buscando "${combo.category}" en "${combo.area}":`, err);
+      console.error(`Error buscando en "${area}":`, err);
       errors++;
       lastError = err;
       continue;
     }
 
-    for (const r of results) {
+    for (const r of shuffle(results)) {
       if (collected.length >= targetLeadCount) break;
       if (existingPlaceIds.has(r.placeId) || seenThisRun.has(r.placeId)) continue;
       seenThisRun.add(r.placeId);
-      collected.push({ ...r, category: combo.category, area: combo.area });
+      collected.push({ ...r, area });
     }
   }
 
-  if (collected.length === 0 && errors === combosTried && combosTried > 0) {
+  if (collected.length === 0) {
+    const detail =
+      errors > 0
+        ? ` Último error: ${lastError instanceof Error ? lastError.message : String(lastError)}`
+        : "";
     throw new Error(
-      `No se pudo generar el lote: todas las búsquedas fallaron. Último error: ${
-        lastError instanceof Error ? lastError.message : String(lastError)
-      }`
+      `No se encontraron clientes nuevos en ninguna de las ${areasTried} zonas buscadas.${detail}`
     );
   }
 
@@ -122,6 +122,6 @@ export async function generateWeeklyBatch(): Promise<GenerateResult> {
     weekStart: batch.weekStart,
     weekEnd: batch.weekEnd,
     leadCount: collected.length,
-    combosTried,
+    areasTried,
   };
 }

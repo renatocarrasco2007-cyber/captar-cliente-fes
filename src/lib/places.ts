@@ -1,6 +1,9 @@
+import { geocodeArea } from "@/lib/geocode";
+
 export type PlaceResult = {
   placeId: string;
   name: string;
+  category: string;
   address: string | null;
   phone: string | null;
   website: string | null;
@@ -11,73 +14,133 @@ export type PlaceResult = {
   lng: number | null;
 };
 
-const FIELD_MASK = [
-  "places.id",
-  "places.displayName",
-  "places.formattedAddress",
-  "places.nationalPhoneNumber",
-  "places.internationalPhoneNumber",
-  "places.websiteUri",
-  "places.googleMapsUri",
-  "places.rating",
-  "places.userRatingCount",
-  "places.location",
-].join(",");
+const OVERPASS_ENDPOINTS = [
+  "https://overpass-api.de/api/interpreter",
+  "https://overpass.kumi.systems/api/interpreter",
+];
 
-export async function searchPlaces(
-  query: string,
-  area: string
-): Promise<PlaceResult[]> {
-  const apiKey = process.env.GOOGLE_PLACES_API_KEY;
-  if (!apiKey || apiKey === "PENDIENTE_CONFIGURAR") {
-    throw new Error(
-      "GOOGLE_PLACES_API_KEY no está configurada. Agrega una API key de Google Places (New) válida."
-    );
+const USER_AGENT = "fes-captacion-clientes/1.0 (uso interno, contacto: fes.informaciones@gmail.com)";
+const RADIUS_METERS = 6000;
+
+type OverpassElement = {
+  type: "node" | "way" | "relation";
+  id: number;
+  lat?: number;
+  lon?: number;
+  center?: { lat: number; lon: number };
+  tags?: Record<string, string>;
+};
+
+function buildBaselineQuery(lat: number, lon: number): string {
+  const around = `around:${RADIUS_METERS},${lat},${lon}`;
+  const clauses = [
+    `node["office"="estate_agent"](${around});`,
+    `way["office"="estate_agent"](${around});`,
+    `node["shop"="real_estate"](${around});`,
+    `way["shop"="real_estate"](${around});`,
+    `node["office"="coworking"](${around});`,
+    `way["office"="coworking"](${around});`,
+    `node["office"="administrative"](${around});`,
+    `way["office"="administrative"](${around});`,
+  ];
+  return `[out:json][timeout:20];\n(\n${clauses.join("\n")}\n);\nout center tags;`;
+}
+
+function classifyCategory(tags: Record<string, string>): string {
+  if (tags.office === "estate_agent" || tags.shop === "real_estate") return "Inmobiliaria / corretaje";
+  if (tags.office === "coworking") return "Coworking";
+  if (tags.office === "administrative") return "Administradora de edificios";
+  return "Empresa / oficina";
+}
+
+function extractPhone(tags: Record<string, string>): string | null {
+  return tags["contact:phone"] ?? tags.phone ?? tags["contact:mobile"] ?? null;
+}
+
+function extractWebsite(tags: Record<string, string>): string | null {
+  return tags["contact:website"] ?? tags.website ?? null;
+}
+
+function extractAddress(tags: Record<string, string>): string | null {
+  const parts = [
+    tags["addr:street"],
+    tags["addr:housenumber"],
+    tags["addr:city"] ?? tags["addr:suburb"],
+  ].filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function runOverpassQuery(query: string): Promise<OverpassElement[]> {
+  let lastError: unknown = null;
+
+  for (const endpoint of OVERPASS_ENDPOINTS) {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "User-Agent": USER_AGENT,
+          },
+          body: `data=${encodeURIComponent(query)}`,
+          signal: AbortSignal.timeout(25_000),
+        });
+
+        if (!res.ok) {
+          throw new Error(`Overpass error (${res.status}): ${(await res.text()).slice(0, 200)}`);
+        }
+
+        const data = await res.json();
+        return (data.elements ?? []) as OverpassElement[];
+      } catch (err) {
+        lastError = err;
+        await sleep(1500);
+        continue;
+      }
+    }
   }
 
-  const res = await fetch("https://places.googleapis.com/v1/places:searchText", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Goog-Api-Key": apiKey,
-      "X-Goog-FieldMask": FIELD_MASK,
-    },
-    body: JSON.stringify({
-      textQuery: `${query} en ${area}`,
-      languageCode: "es",
-      maxResultCount: 20,
-    }),
-  });
+  throw lastError instanceof Error ? lastError : new Error(String(lastError));
+}
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Google Places API error (${res.status}): ${body}`);
+function toPlaceResults(elements: OverpassElement[]): PlaceResult[] {
+  const results: PlaceResult[] = [];
+
+  for (const el of elements) {
+    const tags = el.tags ?? {};
+    const name = tags.name;
+    if (!name) continue;
+
+    const elLat = el.lat ?? el.center?.lat ?? null;
+    const elLon = el.lon ?? el.center?.lon ?? null;
+
+    results.push({
+      placeId: `osm:${el.type}/${el.id}`,
+      name,
+      category: classifyCategory(tags),
+      address: extractAddress(tags),
+      phone: extractPhone(tags),
+      website: extractWebsite(tags),
+      mapsUrl:
+        elLat !== null && elLon !== null
+          ? `https://www.google.com/maps/search/?api=1&query=${elLat},${elLon}`
+          : null,
+      rating: null,
+      userRatingCount: null,
+      lat: elLat,
+      lng: elLon,
+    });
   }
 
-  const data = await res.json();
-  const places = (data.places ?? []) as Array<{
-    id: string;
-    displayName?: { text?: string };
-    formattedAddress?: string;
-    nationalPhoneNumber?: string;
-    internationalPhoneNumber?: string;
-    websiteUri?: string;
-    googleMapsUri?: string;
-    rating?: number;
-    userRatingCount?: number;
-    location?: { latitude?: number; longitude?: number };
-  }>;
+  return results;
+}
 
-  return places.map((p) => ({
-    placeId: p.id,
-    name: p.displayName?.text ?? "Sin nombre",
-    address: p.formattedAddress ?? null,
-    phone: p.internationalPhoneNumber ?? p.nationalPhoneNumber ?? null,
-    website: p.websiteUri ?? null,
-    mapsUrl: p.googleMapsUri ?? null,
-    rating: p.rating ?? null,
-    userRatingCount: p.userRatingCount ?? null,
-    lat: p.location?.latitude ?? null,
-    lng: p.location?.longitude ?? null,
-  }));
+export async function searchPlacesInArea(area: string): Promise<PlaceResult[]> {
+  const { lat, lon } = await geocodeArea(area);
+  const elements = await runOverpassQuery(buildBaselineQuery(lat, lon));
+  return toPlaceResults(elements);
 }
