@@ -14,9 +14,9 @@ function shuffle<T>(arr: T[]): T[] {
 }
 
 export type GenerateResult = {
-  batchId: string;
-  weekStart: string;
-  weekEnd: string;
+  batchId: string | null;
+  weekStart: string | null;
+  weekEnd: string | null;
   leadCount: number;
   areasTried: number;
 };
@@ -59,14 +59,23 @@ export async function generateWeeklyBatch(): Promise<GenerateResult> {
     }
   }
 
-  if (collected.length === 0) {
-    const detail =
-      errors > 0
-        ? ` Último error: ${lastError instanceof Error ? lastError.message : String(lastError)}`
-        : "";
+  if (areasTried > 0 && errors === areasTried) {
     throw new Error(
-      `No se encontraron clientes nuevos en ninguna de las ${areasTried} zonas buscadas.${detail}`
+      `No se pudo buscar en ninguna zona: ${
+        lastError instanceof Error ? lastError.message : String(lastError)
+      }`
     );
+  }
+
+  if (collected.length === 0) {
+    // Búsquedas exitosas, pero todo lo encontrado ya estaba cargado como lead.
+    return {
+      batchId: null,
+      weekStart: null,
+      weekEnd: null,
+      leadCount: 0,
+      areasTried,
+    };
   }
 
   const today = new Date();
