@@ -1,4 +1,5 @@
 import { geocodeArea } from "@/lib/geocode";
+import { isGooglePlacesConfigured, searchGooglePlacesInArea } from "@/lib/google-places";
 
 export type PlaceResult = {
   placeId: string;
@@ -155,8 +156,42 @@ function toPlaceResults(elements: OverpassElement[], area: string): PlaceResult[
   return results;
 }
 
+function normalizeName(name: string): string {
+  return name
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function dedupeByName(results: PlaceResult[]): PlaceResult[] {
+  const seen = new Set<string>();
+  const out: PlaceResult[] = [];
+  for (const r of results) {
+    const key = normalizeName(r.name);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
+}
+
 export async function searchPlacesInArea(area: string): Promise<PlaceResult[]> {
   const { lat, lon } = await geocodeArea(area);
   const elements = await runOverpassQuery(buildQuery(lat, lon));
-  return toPlaceResults(elements, area);
+  const osmResults = toPlaceResults(elements, area);
+
+  if (!isGooglePlacesConfigured()) return osmResults;
+
+  let googleResults: PlaceResult[] = [];
+  try {
+    googleResults = await searchGooglePlacesInArea(area);
+  } catch (err) {
+    console.error(`Google Places falló para "${area}":`, err);
+  }
+
+  // Google's data is generally richer (phone, rating) — keep its entry first
+  // when both sources find the same business.
+  return dedupeByName([...googleResults, ...osmResults]);
 }
