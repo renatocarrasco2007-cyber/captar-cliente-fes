@@ -31,26 +31,36 @@ type OverpassElement = {
   tags?: Record<string, string>;
 };
 
-function buildBaselineQuery(lat: number, lon: number): string {
+function buildQuery(lat: number, lon: number): string {
+  // Fetch every office/shop in range with a plain tag filter (fast, no regex)
+  // and classify + filter by name locally — a server-side name regex over
+  // this many elements times out on the public Overpass instance.
   const around = `around:${RADIUS_METERS},${lat},${lon}`;
   const clauses = [
-    `node["office"="estate_agent"](${around});`,
-    `way["office"="estate_agent"](${around});`,
-    `node["shop"="real_estate"](${around});`,
-    `way["shop"="real_estate"](${around});`,
-    `node["office"="coworking"](${around});`,
-    `way["office"="coworking"](${around});`,
-    `node["office"="administrative"](${around});`,
-    `way["office"="administrative"](${around});`,
+    `node["office"](${around});`,
+    `way["office"](${around});`,
+    `node["shop"](${around});`,
+    `way["shop"](${around});`,
   ];
-  return `[out:json][timeout:20];\n(\n${clauses.join("\n")}\n);\nout center tags;`;
+  return `[out:json][timeout:25];\n(\n${clauses.join("\n")}\n);\nout center tags;`;
 }
 
-function classifyCategory(tags: Record<string, string>): string {
+const REAL_ESTATE_KEYWORDS = ["inmobiliaria", "corretaje", "corredora", "propiedades"];
+const ADMIN_KEYWORDS = ["administradora", "administración de edificios", "condominio", "comunidad edificio"];
+const RENTAL_KEYWORDS = ["arriendo", "arriendos", "amoblado"];
+
+function classifyCategory(tags: Record<string, string>): string | null {
   if (tags.office === "estate_agent" || tags.shop === "real_estate") return "Inmobiliaria / corretaje";
   if (tags.office === "coworking") return "Coworking";
-  if (tags.office === "administrative") return "Administradora de edificios";
-  return "Empresa / oficina";
+
+  const name = (tags.name ?? "").toLowerCase();
+  if (REAL_ESTATE_KEYWORDS.some((k) => name.includes(k))) return "Inmobiliaria / corretaje";
+  if (ADMIN_KEYWORDS.some((k) => name.includes(k))) return "Administradora de edificios";
+  if (RENTAL_KEYWORDS.some((k) => name.includes(k))) return "Arriendo / amoblado";
+
+  // No known real-estate/coworking tag and no relevant keyword in the name:
+  // most likely government offices, unrelated companies, etc. — skip.
+  return null;
 }
 
 function extractPhone(tags: Record<string, string>): string | null {
@@ -107,7 +117,12 @@ async function runOverpassQuery(query: string): Promise<OverpassElement[]> {
   throw lastError instanceof Error ? lastError : new Error(String(lastError));
 }
 
-function toPlaceResults(elements: OverpassElement[]): PlaceResult[] {
+function buildMapsUrl(name: string, address: string | null, area: string): string {
+  const query = address ? `${name}, ${address}` : `${name}, ${area}`;
+  return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+}
+
+function toPlaceResults(elements: OverpassElement[], area: string): PlaceResult[] {
   const results: PlaceResult[] = [];
 
   for (const el of elements) {
@@ -115,20 +130,21 @@ function toPlaceResults(elements: OverpassElement[]): PlaceResult[] {
     const name = tags.name;
     if (!name) continue;
 
+    const category = classifyCategory(tags);
+    if (!category) continue;
+
     const elLat = el.lat ?? el.center?.lat ?? null;
     const elLon = el.lon ?? el.center?.lon ?? null;
+    const address = extractAddress(tags);
 
     results.push({
       placeId: `osm:${el.type}/${el.id}`,
       name,
-      category: classifyCategory(tags),
-      address: extractAddress(tags),
+      category,
+      address,
       phone: extractPhone(tags),
       website: extractWebsite(tags),
-      mapsUrl:
-        elLat !== null && elLon !== null
-          ? `https://www.google.com/maps/search/?api=1&query=${elLat},${elLon}`
-          : null,
+      mapsUrl: buildMapsUrl(name, address, area),
       rating: null,
       userRatingCount: null,
       lat: elLat,
@@ -141,6 +157,6 @@ function toPlaceResults(elements: OverpassElement[]): PlaceResult[] {
 
 export async function searchPlacesInArea(area: string): Promise<PlaceResult[]> {
   const { lat, lon } = await geocodeArea(area);
-  const elements = await runOverpassQuery(buildBaselineQuery(lat, lon));
-  return toPlaceResults(elements);
+  const elements = await runOverpassQuery(buildQuery(lat, lon));
+  return toPlaceResults(elements, area);
 }
